@@ -244,7 +244,7 @@ func TestCookieAttributes(t *testing.T) {
 	if !c.cookie.HttpOnly || c.cookie.SameSite != http.SameSiteLaxMode || c.cookie.Path != "/" || c.cookie.Secure {
 		t.Errorf("cookie %+v", c.cookie)
 	}
-	if d := time.Until(c.cookie.Expires); d < 11*time.Hour || d > 12*time.Hour+time.Minute {
+	if d := time.Until(c.cookie.Expires); d < 14*24*time.Hour-time.Hour || d > 14*24*time.Hour+time.Minute {
 		t.Errorf("ttl %v", d)
 	}
 }

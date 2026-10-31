@@ -37,7 +37,7 @@ Anything not in this spec or the requirements is an extra: propose it to the orc
   `auth_salt, auth_hash, kek_salt, wrapped_dek, escrow_dek BYTEA`, `theme_mode TEXT DEFAULT 'auto'`,
   `theme_hue SMALLINT NULL`, `created_at, password_changed_at TIMESTAMPTZ`.
 - `sessions`: `token_hash BYTEA PK, user_id FK CASCADE, wrapped_dek BYTEA, created_at, expires_at`.
-  The DEK is wrapped with a key derived from the cookie token (as passman). TTL constant 12 h.
+  The DEK is wrapped with a key derived from the cookie token (as passman). TTL constant 14 days (was 12 h; the app runs locally and re-login was a chore).
 - `certs`:
   `id UUID PK, user_id FK CASCADE, name TEXT, hosts TEXT[], bits INT, days INT, subject JSONB`
   (`{C,ST,L,O,OU}`, empty keys omitted), `cnf TEXT, cert_pem TEXT, key_enc BYTEA`

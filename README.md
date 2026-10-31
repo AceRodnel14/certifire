@@ -58,7 +58,8 @@ once it has expired, until it is renewed or deleted. Use **Send test** to try a 
 
 ### Security notes
 - Registration is open by design: anyone who can reach the app can create an account. Keep it on a trusted network or behind your proxy's access control.
-- Sessions last 12 hours. The app runs the `openssl` CLI as a child process (the image includes it).
+- You stay signed in for 14 days from login (fixed, not extended by use) on a device you trust;
+  logging out or a password change/reset ends it sooner. The app runs the `openssl` CLI as a child process (the image includes it).
 - Private keys are encrypted at rest with a per-user key that is wrapped by the user's
   login password (Argon2id), with an escrow copy that only the master key can open.
 - Certificates (`.crt`), `.cnf` files, host lists, expiry dates and **webhook URLs are
@@ -173,4 +174,4 @@ on the default branch and release tags a test build with a smoke run, the multi-
 image push to Docker Hub and the GitHub sync.
 
 ---
-_Developed with assistance from Claude (Claude Opus 5.5)._
+_Developed with assistance from Claude (Claude Opus 5.5, Claude Sonnet 5.5)._

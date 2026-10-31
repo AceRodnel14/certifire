@@ -19,7 +19,7 @@ import (
 
 const (
 	sessionCookie = "certifire_session"
-	sessionTTL    = 12 * time.Hour
+	sessionTTL    = 14 * 24 * time.Hour
 	testInterval  = 10 * time.Second
 )
 
