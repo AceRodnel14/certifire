@@ -1,0 +1,21 @@
+# QA-only override. Never shipped. Used as: docker compose -p certifire-qa -f docker-compose.yml -f compose.qa.yml
+# stub = local TLS webhook stub reachable under the hostnames the app's validation requires.
+services:
+  stub:
+    image: python:3.13-alpine
+    command: ["python", "/stub/stub.py"]
+    volumes:
+      - ${QA_STUB_DIR}:/stub:ro
+    ports:
+      - "127.0.0.1::9000"
+    networks:
+      default:
+        aliases:
+          - discord.com
+          - qa.environment.api.powerplatform.com
+  app:
+    environment:
+      SSL_CERT_FILE: /qa/ca.crt
+      BACKUP_ALL_ALLOWED_IPS: ${QA_BACKUP_ALL_IPS:-}
+    volumes:
+      - ${QA_STUB_DIR}/ca.crt:/qa/ca.crt:ro

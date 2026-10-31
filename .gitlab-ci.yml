@@ -1,0 +1,9 @@
+# Branches and MRs: lint + tests. Default branch and release tags (latest, vX.Y, vX.Y.Z):
+# test build + smoke run, multi-arch image to Docker Hub, GitHub sync.
+include:
+  - project: '$CI_PROJECT_NAMESPACE/gitlab-actions'
+    file: 'templates/app.yml'
+
+variables:
+  # go:embed needs web/dist; Go lint/tests run without the Vite build
+  GO_PREPARE: mkdir -p web/dist && touch web/dist/.keep

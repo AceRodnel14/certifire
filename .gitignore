@@ -1,0 +1,5 @@
+.env
+/app
+web/node_modules/
+web/dist/
+qa/evidence-last/

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="70 50 650 830">
+  <defs>
+    <style>.l{fill:#1c1917}@media (prefers-color-scheme:dark){.l{fill:#fff}}</style>
+    <linearGradient id="cf-flame" x1="0.7" y1="0" x2="0.2" y2="1">
+      <stop offset="0" stop-color="#FFC400"/>
+      <stop offset="0.5" stop-color="#F57C00"/>
+      <stop offset="1" stop-color="#E53920"/>
+    </linearGradient>
+    <mask id="cf-keyhole">
+      <rect x="0" y="0" width="816" height="976" fill="#fff"/>
+      <circle cx="392" cy="556" r="75" fill="#000"/>
+      <path d="M366 596 H418 L450 730 H333 Z" fill="#000"/>
+    </mask>
+  </defs>
+  <!-- flame -->
+  <path fill="url(#cf-flame)" d="M518 62 C562 104 582 166 552 268 L618 208 C642 272 656 330 662 383 L628 383 L604 332 C568 382 516 406 450 408 C498 378 518 330 506 282 C496 246 472 226 440 212 C482 190 522 148 518 62 Z"/>
+  <!-- shackle -->
+  <path class="l" d="M163 383 V330 A227 222 0 0 1 470 125 L415 188 A150 146 0 0 0 240 330 V383 Z"/>
+  <!-- body with keyhole cut out -->
+  <path class="l" mask="url(#cf-keyhole)" d="M104 408 H680 Q702 408 702 430 V700 H548 Q528 700 525 720 L503 865 H104 Q82 865 82 843 V430 Q82 408 104 408 Z"/>
+  <!-- page corner -->
+  <path class="l" d="M566 728 H700 L540 862 L552 742 Q554 728 566 728 Z"/>
+</svg>
