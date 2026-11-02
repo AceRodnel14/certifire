@@ -13,11 +13,16 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	_ "time/tzdata" // REMINDER_TZ works on the tzdata-less alpine image
 
 	"certifire/internal/reminder"
 	"certifire/internal/server"
 	"certifire/internal/store"
 )
+
+// version is the release; override at build time with
+// -ldflags "-X main.version=1.2.3".
+var version = "1.0.0"
 
 // static is the embedded web UI; nil for a backend-only build (web.go sets it).
 var static fs.FS
@@ -29,6 +34,8 @@ func main() {
 			os.Exit(healthcheck())
 		case "reset-password":
 			os.Exit(resetPassword(os.Args[2:]))
+		case "remind":
+			os.Exit(remind(os.Args[2:]))
 		}
 	}
 	if err := run(); err != nil {
@@ -42,6 +49,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	rcfg, err := reminder.LoadConfig(os.Getenv)
+	if err != nil {
+		return err
+	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -52,13 +63,13 @@ func run() error {
 
 	errc := make(chan error, 1)
 	go func() {
-		slog.Info("listening", "addr", srv.Addr, "base_url", cfg.BaseURL)
+		slog.Info("listening", "addr", srv.Addr, "base_url", cfg.BaseURL, "version", version)
 		errc <- srv.ListenAndServe()
 	}()
 
 	// The server is up before the database: /healthz answers while we retry.
 	dbDone := make(chan *store.Store, 1)
-	go func() { dbDone <- connect(ctx, cfg.DatabaseURL, app) }()
+	go func() { dbDone <- connect(ctx, cfg.DatabaseURL, app, rcfg) }()
 
 	select {
 	case err := <-errc:
@@ -83,7 +94,7 @@ func run() error {
 // connect retries the database with backoff, then attaches it to the server
 // and starts the background jobs. It returns the store (nil if ctx ended first)
 // after ctx is cancelled.
-func connect(ctx context.Context, url string, app *server.Server) *store.Store {
+func connect(ctx context.Context, url string, app *server.Server, rcfg reminder.Config) *store.Store {
 	wait := time.Second
 	for {
 		var st *store.Store
@@ -97,8 +108,12 @@ func connect(ctx context.Context, url string, app *server.Server) *store.Store {
 			slog.Info("database ready")
 			app.SetStore(st)
 			go app.ReapSessions(ctx)
-			job := reminder.New(st, app.Sender())
-			job.Run(ctx) // blocks until ctx ends
+			if rcfg.LocalCron {
+				reminder.New(st, app.Sender(), rcfg).Run(ctx) // blocks until ctx ends
+			} else {
+				slog.Info("in-app reminder scheduler off; run `app remind` from a schedule")
+				<-ctx.Done()
+			}
 			return st
 		}
 		slog.Warn("database not ready", "err", err, "retry_in", wait.String())

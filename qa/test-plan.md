@@ -247,6 +247,61 @@ Setup: webhooks for both kinds on user W pointing at the stub; certs created via
 | BK9 | Reset to disabled; POST | 404 |
 Not covered by the suite (Go unit tests): IPv4-mapped peer, per-IP vs global limiter counted separately, fileBases table (three dups, a cert literally named `<name>_<uuid>`), config parse errors. Regression: all cases 01-04 run unchanged before this one.
 
+### F24 Date-based reminders (REMINDER_TZ / TIME / STEPS / LOCAL_CRON, `remind` subcommand)
+Supersedes the day-count cases M1, M3, M4 and M6 above for steps 7,5,3,1,0 (2 is no longer a step); M2, M5, M7, M10, M11 stay and are rerun unchanged. All run through the real image with the webhook stub (fake ids/tokens, no external calls), compose project `certifire-qa`, evidence in `$OUT` only.
+
+**Time control without app code changes**
+- The app's clock is the container's wall clock, so every case is relative to "now": the script computes `today` in the zone under test with `TZ=<zone> date`, then sets `certs.not_after` by `psql` to an absolute instant (e.g. `timestamptz '2026-11-08 16:30+00'`, computed as "today in zone + N days at hh:mm"). Cases are never tied to fixed calendar dates, so the suite can run on any day.
+- "Next day" is simulated as before: shift `not_after` one day earlier and/or rewrite `reminders_sent.mark` to yesterday's value; no clock change.
+- `REMINDER_TZ`, `REMINDER_TIME`, `REMINDER_STEPS`, `REMINDER_LOCAL_CRON` are set per phase in the run copy's `.env` plus `docker compose up -d` (recreate); `REMINDER_TIME` gating is tested with "now+3 min" (not yet due) and "00:00" (due), computed in `REMINDER_TZ`.
+- `remind` is run as `docker compose run --rm --no-deps app remind` (same image, own container, DB already up) or `exec app /app remind`; exit code and stub request count are asserted.
+- Agreed with backend: every tick (in-app and `remind`) logs `reminder tick` with sent, failed and skipped counts, which the suite greps to assert "no ticks" and "one message". There is no QA-only interval variable, so the hourly retry is covered by the Go unit tests (injectable Sleep/Now) plus one optional 65-minute soak marked INFO; cases that needed a later tick (G1, R1, R2) assert the startup/`remind` behaviour in the suite and are INFO for the timed part. Still to come from backend: (c) the exact `reminders_sent.kind/mark` format for the new messages (the plan reads rows only to count them and to simulate the next day).
+
+**Scope decision (user):** Discord is the supported, tested path. All F24 cases run with only a Discord webhook configured, so N certs give N messages (expected counts in the cases below that say "x 2" or "per kind" mean x 1 here). Teams stays in the app untouched: it gets one smoke case (TM1) and the existing Teams validation/send-test cases (F18/F19) stay as they are. The older M-cases that configure both kinds keep doing so.
+
+**Cases** (Discord only unless stated)
+| ID | Steps | Expect |
+|---|---|---|
+| D1 | Defaults only (empty `REMINDER_*`): start, check `/readyz`, `remind` on empty DB | app starts; `remind` exits 0, 0 messages (CI smoke) |
+| D2 | TZ=UTC: five certs whose expiry date in UTC is today+7, +5, +3, +1, +0 (not_after later today) plus controls today+2, +4, +6, +8 | one message per cert with a step, none for controls (2 is not a step) |
+| D3 | Each step text | "expires in N days" (N=1 singular "1 day"), day 0 "expires today"; hosts and dates shown |
+| D4 | Day 0 before not_after (now < not_after) and after (not_after = 2 h ago, same TZ date) | exactly one message each; a cert that gets "expires today" at startup gets no second message after crossing not_after (restart, ticks): never two on the expiry date |
+| D5 | Expired: not_after on date-1 and date-2 (TZ date) | one "expired ..." message per day per cert, text "expired today"/"expired 1 day ago"/"2 days ago" per the final wording; same-day restart sends none; simulated next day sends one more; continues daily until renewed or deleted |
+| D6 | Expired cert is renewed, then deleted (M5 variants) | reminders stop; delete the renewal: resume |
+| T1 | not_after = 2026-11-08T16:30Z shape, REMINDER_TZ=Asia/Manila: relative form: instant that is date D in UTC and D+1 in Manila | step chosen from the Manila date; the same cert under UTC is one day further away (two runs, different step) |
+| T2 | Manila near-midnight edge: not_after 23:59 and 00:01 Manila local on consecutive dates | counted on their own local dates, not UTC |
+| T3 | Message text with REMINDER_TZ=Asia/Manila and America/Los_Angeles | dates in that zone (plus tz name/offset if the wording has one), never the UTC date when they differ |
+| T4 | A DST-change zone (America/New_York across a change, using a not_after near it) | step arithmetic is by calendar date, not 24 h blocks (informational if the date is not within 8 days of a change) |
+| G1 | LOCAL_CRON=true, REMINDER_TIME = now+3 min in tz | startup tick sends nothing; after the time passes and a tick runs (needs hook (b)) the day's reminders go out once |
+| G2 | REMINDER_TIME=00:00 | startup tick sends the due reminders immediately (same-day catch-up on restart) |
+| G3 | Restart after sends, same day | no repeats (claims kept) |
+| G4 | No backfill: cert whose step day was yesterday and was never sent (insert after the day) | nothing sent for the missed step; only today's step/expiry rules apply |
+| R1 | Stub 500 at the first tick, then 204; claims released; later tick (hook (b), else Go test) | retried and delivered once per kind; no duplicate afterwards |
+| R2 | 429 with Retry-After | treated as delayed: claim released, retried |
+| R3 | Permanent 4xx (404): webhook marked broken, claim kept, later ticks skip it |  |
+| L0 | LOCAL_CRON=false, serve for 70 s | no `tick` lines in app logs; zero stub requests even with due certs; `/healthz`, `/readyz` still 200 |
+| C1 | `remind` with due certs, stub 204 | exit 0, one message per cert/kind, tick line printed, container exits (no server) |
+| C2 | Rerun immediately | exit 0, 0 new messages |
+| C3 | Stub 500 | exit non-zero; claims released; rerun with stub 204 sends each once and exits 0 |
+| C4 | Stub 429 and a network failure (stub down) | non-zero, then recovery as C3 |
+| C5 | Stub 404 | webhook marked broken, exit 0; next `remind` skips it |
+| C6 | `remind` with REMINDER_TIME set to a future time | `remind` ignores REMINDER_TIME: it sends whatever is due now and exits 0 (the CronJob schedule sets the time) |
+| C7 | Empty DB / no webhooks / user without webhook | exit 0, no messages |
+| C8 | Two `remind` runs started together (same due certs) | total messages = one per cert/kind (claims); both exit 0; no duplicate key errors in logs |
+| C9 | `remind` and a fresh `app` start at the same time against an empty database (new volume) | no schema race error (advisory lock), both succeed, tables created once |
+| C10 | `remind` with REMINDER_LOCAL_CRON=true and =false | identical behaviour: one tick, exit; the flag only gates the in-app scheduler |
+| B1 | Bad values, each in serve and in `remind`: REMINDER_TZ=Mars/Base, REMINDER_TIME=25:00 / 7:5 / empty-ish "abc", REMINDER_STEPS=7,,3 / -1 / abc / 400 / duplicates / empty, REMINDER_LOCAL_CRON=maybe | exit 1 before serving or sending; one clear message naming the variable and the bad value; no secrets/DATABASE_URL in it; compose shows restart loop (informational) |
+| B2 | Valid edge values: TZ=Etc/UTC, TIME=23:59, STEPS=0 and STEPS=30,7,0 | accepted; window follows the largest step: a cert 30 days out is found (candidate window), 31 is not |
+| B3 | Step list "1, 3,7,0" (spaces, any order) | accepted, stored descending (messages identical to "7,3,1,0"); duplicates, empty entries ("7,,3"), non-integers and values outside 0-365 exit 1 (366 and -1 rejected, 0 and 365 accepted) |
+| TM1 | Teams smoke: add a Teams webhook (stub) next to Discord, one cert due today, run `remind` (or startup tick) | the reminder reaches the Teams stub as well; a 202 response counts as sent (claim kept, no retry, exit 0); Discord still gets exactly one. No further Teams date/step/failure cases. |
+| X1 | Embedded tzdata | run the image with no `/usr/share/zoneinfo` (`docker run --rm --entrypoint sh ... -c 'ls /usr/share/zoneinfo'` shows none under distroless/alpine variant) and `REMINDER_TZ=Asia/Manila` still works |
+| X2 | Message and logs | no webhook URL/token, private key or password in messages, app logs or `remind` output; CSP/other suite cases unchanged |
+| X3 | k8s_cron/ (when infra delivers) | `docker run --rm -v ...:/k koalaman/kubeconform` (or `kubectl --dry-run=client` not available: use kubeconform only) on the CronJob; checks: `command/args` = `/app remind`, same image and env secret refs, `concurrencyPolicy`, `restartPolicy: OnFailure` or `backoffLimit` so non-zero retries, `startingDeadlineSeconds`; README matches the exit-code contract. No cluster access; static review only |
+
+**Existing suite updates (cases_03):** M1 uses steps 7,5,3,1,0 (replace the `2` cert with `0`, keep 4/6/8 controls and add 2 as a control); M3 adds the 2-day control; M4 uses the TZ-date marks; message text assertions change to the new wording once backend fixes it. The whole suite runs with defaults (UTC, 00:00, LOCAL_CRON true) and its restart-driven approach is unchanged. New F24 cases go in a new script `qa/helpers/cases_06_reminders_dates.sh` (plus edits to cases_03), run last because they recreate the app with other env values and restore defaults at the end.
+
+**Open items:** final message wording and the `reminders_sent.kind/mark` scheme for date-based days (backend will report). Resolved: tick log line, `remind` ignores REMINDER_TIME and REMINDER_LOCAL_CRON, step-list rules (B3).
+
 ## 2. UI walkthrough (visible WSL Chrome)
 Script `qa/helpers/ui_walkthrough.py` (Playwright, `launch_persistent_context` on a fresh profile dir
 under the run folder, `executable_path=/usr/bin/google-chrome`, `headless=False`, slow_mo 300).

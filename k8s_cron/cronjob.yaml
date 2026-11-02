@@ -1,0 +1,56 @@
+# Reference example: runs `/app remind` once a day (one reminder check, then exit).
+# Use it when the app Deployment sets REMINDER_LOCAL_CRON=false (e.g. scaled to zero by KEDA).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: certifire-remind
+  namespace: <namespace>
+  labels:
+    app.kubernetes.io/name: certifire
+    app.kubernetes.io/component: remind
+spec:
+  # schedule + timeZone set the run time (remind ignores REMINDER_TIME). Keep timeZone equal to
+  # REMINDER_TZ so dates line up; timeZone needs Kubernetes 1.27+.
+  schedule: "0 8 * * *"
+  timeZone: Asia/Manila
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: certifire
+            app.kubernetes.io/component: remind
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: remind
+              image: eacer/certifire:v1.0
+              args: ["remind"]
+              envFrom:
+                - secretRef:
+                    name: <app-secret>
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi

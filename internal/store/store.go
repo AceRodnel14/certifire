@@ -101,11 +101,30 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		pool.Close()
 		return nil, err
 	}
-	if _, err := pool.Exec(ctx, schema); err != nil {
+	if err := applySchema(ctx, pool); err != nil {
 		pool.Close()
 		return nil, err
 	}
 	return &Store{pool: pool}, nil
+}
+
+// schemaLockKey is the advisory lock that serialises schema creation, so web
+// and `app remind` processes starting together cannot race on CREATE TABLE.
+const schemaLockKey int64 = 0x63657274_69666972 // "certifir"
+
+func applySchema(ctx context.Context, pool *pgxpool.Pool) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, schemaLockKey); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, schema); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // Close releases the pool.

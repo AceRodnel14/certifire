@@ -118,14 +118,16 @@ type Candidate struct {
 	URL      string
 }
 
-// ReminderCandidates returns un-renewed certs expiring before now+8 days (or
-// already expired) whose owner has a non-broken webhook, ordered per webhook.
-func (s *Store) ReminderCandidates(ctx context.Context, now time.Time) ([]Candidate, error) {
+// ReminderCandidates returns un-renewed certs expiring before now+windowDays
+// days (or already expired) whose owner has a non-broken webhook, ordered per
+// webhook. Expired certs stay included until renewed or deleted.
+func (s *Store) ReminderCandidates(ctx context.Context, now time.Time, windowDays int) ([]Candidate, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT c.id::text, c.user_id, c.name, c.hosts, c.not_after, w.kind, w.url
 		 FROM certs c JOIN webhooks w ON w.user_id = c.user_id
-		 WHERE c.renewed_by IS NULL AND w.broken_at IS NULL AND c.not_after < $1::timestamptz + interval '8 days'
-		 ORDER BY c.user_id, w.kind, c.not_after`, now)
+		 WHERE c.renewed_by IS NULL AND w.broken_at IS NULL
+		   AND c.not_after < $1::timestamptz + $2::int * interval '1 day'
+		 ORDER BY c.user_id, w.kind, c.not_after`, now, windowDays)
 	if err != nil {
 		return nil, err
 	}

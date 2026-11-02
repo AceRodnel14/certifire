@@ -1,21 +1,42 @@
-# QA-only override. Never shipped. Used as: docker compose -p certifire-qa -f docker-compose.yml -f compose.qa.yml
+# QA-only override. Never shipped. The runtime stack (app, db, stub) is on an INTERNAL network: no route to the internet.
+# Image builds happen before `up` and are not affected. `gw` (QA forwarder) is the only container with an outside network;
+# it publishes the app and stub-control ports on 127.0.0.1 for the host-side curl cases. Used as: docker compose -p certifire-qa -f docker-compose.yml -f compose.qa.yml
 # stub = local TLS webhook stub reachable under the hostnames the app's validation requires.
 services:
   stub:
-    image: python:3.13-alpine
+    image: python:3.13-alpine3.24
     command: ["python", "/stub/stub.py"]
     volumes:
       - ${QA_STUB_DIR}:/stub:ro
-    ports:
-      - "127.0.0.1::9000"
+    ports: !reset []
     networks:
       default:
         aliases:
           - discord.com
           - qa.environment.api.powerplatform.com
+  gw:
+    image: python:3.13-alpine3.24
+    command: ["python", "/stub/fwd.py"]
+    volumes:
+      - ${QA_STUB_DIR}:/stub:ro
+    ports:
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
+      - "127.0.0.1::9000"
+    networks: [default, edge]
+    depends_on: [app, stub]
   app:
+    ports: !reset []
     environment:
       SSL_CERT_FILE: /qa/ca.crt
       BACKUP_ALL_ALLOWED_IPS: ${QA_BACKUP_ALL_IPS:-}
+      # F24: empty = app default. Set per call: QA_REMINDER_TZ=Asia/Manila $DC up -d --force-recreate --no-deps app
+      REMINDER_TZ: ${QA_REMINDER_TZ:-}
+      REMINDER_TIME: ${QA_REMINDER_TIME:-}
+      REMINDER_STEPS: ${QA_REMINDER_STEPS:-}
+      REMINDER_LOCAL_CRON: ${QA_REMINDER_LOCAL_CRON:-}
     volumes:
       - ${QA_STUB_DIR}/ca.crt:/qa/ca.crt:ro
+networks:
+  default:
+    internal: true
+  edge: {}

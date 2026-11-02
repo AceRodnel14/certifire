@@ -21,17 +21,30 @@ Anything not in this spec or the requirements is an extra: propose it to the orc
 | Item | Version |
 |---|---|
 | Go | 1.26 (template; local go1.26.7). Deps only: `github.com/jackc/pgx/v5`, `golang.org/x/crypto` (argon2), `golang.org/x/term`. stdlib router (`net/http` patterns), stdlib webhooks client. `CGO_ENABLED=0`. |
-| Web build stage | `node:24-alpine` (user decision) |
+| Web build stage | `node:24.22-alpine3.24` (user decision: Node 24; pinned to the minor version from 1.0.0) |
 | Web | template: React ^19.3, Vite ^8.3, TypeScript ^7.0, Vitest ^5.0; **add ESLint** (flat config, typescript-eslint, eslint-plugin-react-hooks) and an `npm run lint` script (template gap; required by frontend.md and CI). No router, UI or chip library. |
-| Runtime image | pinned current stable `alpine:3.x` (verify amd64+arm64 with `docker buildx imagetools inspect`) + `apk add --no-cache openssl`, non-root user. Deviation from distroless: openssl CLI is required. No psql, no curl/wget. |
-| Postgres | `postgres:18-alpine` |
+| Build stage | `golang:1.26-alpine3.24` |
+| Runtime image | `alpine:3.24` (verify amd64+arm64 with `docker buildx imagetools inspect`) + `apk add --no-cache openssl~=3.5`, non-root user. Deviation from distroless: openssl CLI is required. No psql, no curl/wget. |
+| Postgres | `postgres:18.6-alpine3.24` |
 
 ## 2. Configuration (env)
 `PORT` (8080), `BASE_URL` (cookies `Secure` when it starts with `https://`), `DATABASE_URL`,
 `LOG_LEVEL` (info). Compose-only: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `IMAGE`,
-`APP_BIND`, `APP_PORT`. Nothing else (session TTL, thresholds, reminder time are constants).
+`APP_BIND`, `APP_PORT`. Reminders (user decision, 1.0.0): `REMINDER_TZ` (UTC), `REMINDER_TIME`
+(`00:00`, in that zone), `REMINDER_STEPS` (`7,5,3,1,0`), `REMINDER_LOCAL_CRON` (true); see section 7.
+Invalid values stop startup (serve and `remind`). Nothing else (session TTL is a constant).
 
 ## 3. Data model (embedded schema SQL, `CREATE ... IF NOT EXISTS`, applied at startup)
+Schema changes (user decision, so existing deployments upgrade by just starting the new image):
+- New tables and indexes: `CREATE TABLE/INDEX IF NOT EXISTS` in the schema block.
+- New columns: never edit an existing `CREATE TABLE` alone (it is skipped on existing databases).
+  Append `ALTER TABLE <t> ADD COLUMN IF NOT EXISTS <col> <type> ...` to the schema block, with a
+  `DEFAULT` or allowing NULL, so rows that already exist get a value. Safe to run on every start.
+- Code must keep working while an older pod is still running (rollouts, KEDA): older code ignores the
+  new column because queries name their columns explicitly.
+- Renames, type changes, drops and data backfills are not repeatable this way: they need a numbered,
+  run-once migration step (track the version in `meta`), added when the first such change comes.
+- The schema is applied under a Postgres advisory lock (section 7), so concurrent starts don't race.
 - `meta(key TEXT PK, value BYTEA)`: escrow public key, master salt, escrow private key sealed with the master key.
 - `users`: `id BIGSERIAL PK, username TEXT` (unique index on `lower(username)`), `is_admin BOOL`,
   `auth_salt, auth_hash, kek_salt, wrapped_dek, escrow_dek BYTEA`, `theme_mode TEXT DEFAULT 'auto'`,
@@ -82,9 +95,12 @@ Mutating requests: JSON bodies only, same-origin check (as passman's `sameOrigin
 | `GET /api/admin/users` | admin | → `[{id, username, isAdmin, createdAt, certCount}]` |
 | `POST /api/admin/users/{id}/password` | admin | `{masterKey, password, confirm}` → 204; revokes that user's sessions; 403 wrong master key (throttled) |
 
-`daysLeft = floor((notAfter - now) / 24h)` (negative once expired). Server and UI use the same rule.
+`daysLeft = floor((notAfter - now) / 24h)` (negative once expired). Server and UI use the same rule
+for the countdown shown in the app. Reminders (section 7) count calendar days in `REMINDER_TZ`
+instead, so a message can differ from the UI countdown by one day.
 
-CLI subcommands of `/app`: `healthcheck` (GET `http://127.0.0.1:$PORT/healthz`), and
+CLI subcommands of `/app`: `healthcheck` (GET `http://127.0.0.1:$PORT/healthz`), `remind` (one
+reminder check, then exit; section 7), and
 `reset-password`, which prompts for master key (hidden; **not** argv), username, new password and
 confirm, then re-wraps that user's DEK via escrow and revokes their sessions. Usage:
 `docker compose exec app /app reset-password`.
@@ -139,13 +155,26 @@ confirm, then re-wraps that user's DEK via escrow and revokes their sessions. Us
   shown in the UI; the job skips broken webhooks until the URL is re-saved or a test succeeds.
 - Masked display: `scheme://host/…` + last 4 chars of the URL, e.g. `https://discord.com/…abcd`.
 
-## 7. Reminder job (in-process)
-- Runs once at startup (after DB ready), then every hour. Hourly tick + dedupe table = "daily"
-  without missing a day across restarts.
-- Candidates: certs with `renewed_by IS NULL` whose owner has a non-broken webhook.
-  - `daysLeft ∈ {7,5,3,2,1}` → mark = that number. Missed thresholds are not backfilled.
-  - `notAfter <= now` → mark = `expired:<UTC date>` (one per day until renewed or deleted).
-  - `daysLeft = 0` but not yet expired: nothing.
+## 7. Reminder job
+- Dates, not hours: `daysLeft` = (date of `not_after` in `REMINDER_TZ`) - (today in `REMINDER_TZ`),
+  as calendar dates (DST-safe). `REMINDER_TZ` defaults to UTC; tzdata is embedded in the binary.
+- Two ways to run a check (`Tick`), same logic and dedupe:
+  - `REMINDER_LOCAL_CRON=true` (24/7 setups): in-process, once at startup (after DB ready), then at
+    the next hourly tick or the next `REMINDER_TIME`, whichever comes first (so a late time like 23:30
+    still runs that day); a day's reminders go out only from `REMINDER_TIME` (in `REMINDER_TZ`) on. Later ticks retry
+    failed sends and catch up after a same-day restart.
+  - `REMINDER_LOCAL_CRON=false` (KEDA scale-to-zero): no in-process ticks. `/app remind` runs one
+    check and exits (ignores `REMINDER_TIME`; the scheduler sets the time), from a k8s CronJob
+    (reference example in `k8s_cron/`) or host cron. Exit non-zero on config/DB error or when any send
+    was delayed (so the Job retries the same day); a permanently broken webhook is not an error.
+- Candidates: certs with `renewed_by IS NULL` whose owner has a non-broken webhook, with `not_after`
+  inside max(step) + 2 days (query parameter) or already expired.
+  - `daysLeft ∈ REMINDER_STEPS` (default 7,5,3,1,0) → mark = that number; `0` = the expiry day
+    (one message that day, whether or not `not_after` has passed). Missed steps are not backfilled
+    across days (user decision).
+  - `daysLeft < 0` → mark = `expired:<today in REMINDER_TZ>` (one per day until renewed or deleted).
+- The schema is applied under a Postgres advisory lock, so web and `remind` pods starting together
+  don't race on `CREATE ... IF NOT EXISTS`.
 - Per (cert, kind, mark): claim with `INSERT ... ON CONFLICT DO NOTHING`; send only if the insert
   claimed the row. 5xx/network/429-after-one-wait (cap 60 s) → delete the claim (retry next tick).
   Permanent 4xx → keep the claim, mark the webhook broken. Send sequentially per webhook.
@@ -175,9 +204,12 @@ confirm, then re-wraps that user's DEK via escrow and revokes their sessions. Us
 - Graceful shutdown on SIGTERM (stop job, drain HTTP, close pool). slog to stdout.
 - Image `HEALTHCHECK CMD ["/app","healthcheck"]` (template timings). No `VOLUME /data` (no app files).
 - `docker-compose.yml`: `app` (template shape, `depends_on: [db]` without condition) + `db`
-  (`postgres:18-alpine`, named volume `pg-data`, not published on the host). Healthchecks commented
+  (`postgres:18.6-alpine3.24`, named volume `pg-data`, not published on the host). Healthchecks commented
   out; **no** db healthcheck/`service_healthy`. `docker compose up --build` works from a fresh clone
-  with `.env` copied from `.env.example` (placeholder `POSTGRES_PASSWORD=change-me`).
+  with `.env` copied from `.env.example` and `POSTGRES_PASSWORD` filled in (letters and digits). The
+  example leaves it empty, and compose uses `${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}` (apps.md
+  exception for `POSTGRES_PASSWORD`; CI's compose check supplies a dummy value), so a blank or unset
+  value stops compose with that message.
 - `.gitlab-ci.yml`: only the `templates/app.yml` include.
 
 ## 10. UI (frontend)
@@ -217,6 +249,8 @@ confirm, then re-wraps that user's DEK via escrow and revokes their sessions. Us
 `.dockerignore` excludes `.git`, `design/`, `dockerdesc.md`, `.env*`, `web/node_modules`, `web/dist`, `**/testdata`. (`_test.go` files never reach the binary anyway.)
 
 ## 12. Validation before hand-off
+Test in Docker as far as possible (user decision: the app ships on Docker and Kubernetes): the real
+image through compose, and unit/lint tools inside the pinned images above rather than host builds.
 - backend: `gofmt -l .` (empty), `go vet ./...`, `go test ./...`, `GOARCH=arm64 go build ./...`,
   `golangci-lint run` (install on trusted WSL or run the pinned `golangci/golangci-lint` image).
   DB tests read `TEST_DATABASE_URL` and skip if unset; run them against
@@ -264,14 +298,19 @@ confirm, then re-wraps that user's DEK via escrow and revokes their sessions. Us
 19. Send test (QA uses a local stub, not real webhooks, or the backend's `httptest`): delivered /
     accepted (Teams message) / 404 → broken badge with reason / 429 → retry info; second test
     within 10 s → 429. Re-saving the URL clears broken.
-20. Reminders (QA sets `not_after` in the DB, stub endpoint): one message each at 7, 5, 3, 2, 1
-    days; no resend after restart; expired → one per UTC day; renewed or deleted certs get none;
-    5xx → retried next tick; permanent 4xx → broken, no further sends; both kinds when both configured.
+20. Reminders (QA sets `not_after` in the DB, stub endpoint): one message each at the
+    `REMINDER_STEPS` days (default 7, 5, 3, 1 and the expiry day), by calendar date in `REMINDER_TZ`
+    (UTC and Asia/Manila near midnight); no resend after restart; expired → one per day; renewed or
+    deleted certs get none; `REMINDER_TIME` gating with `REMINDER_LOCAL_CRON=true`, none with `false`;
+    `remind` exit codes (delayed send non-zero, broken webhook 0); concurrent runs send once; bad config
+    stops startup; 5xx → retried next tick; permanent 4xx → broken, no further sends; both kinds when
+    both configured.
     Real Discord/Teams delivery: user check with their own URLs (Teams URL pattern must be verified
     against one real Workflows URL before release).
 21. Theme: auto/light/dark + hue changes background tints; persists per user across logins.
 22. Ops: `/healthz` 200 and `/readyz` 503 with DB stopped; app recovers when DB returns; container
-    healthy; image runs on amd64 and arm64 with openssl; `docker compose up --build` from a fresh copy.
+    healthy; image runs on amd64 and arm64 with openssl; `docker compose up --build` from a fresh copy
+    (with `POSTGRES_PASSWORD` set; blank or unset → compose stops with `set POSTGRES_PASSWORD`).
 23. Info tooltips on every create-form field: open on hover, Tab focus and tap; close on Escape, blur
     and outside tap; screen-reader text via `aria-describedby`; no CSP violations in the console.
 24. Accent hue colours the top bar (white text readable), dialog headers and the login/setup background

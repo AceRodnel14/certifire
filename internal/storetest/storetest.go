@@ -19,6 +19,18 @@ import (
 // skipped when TEST_DATABASE_URL is unset.
 func New(t *testing.T) *store.Store {
 	t.Helper()
+	st, err := store.Open(context.Background(), URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	return st
+}
+
+// URL returns a database URL whose search_path is a fresh, empty schema,
+// dropped at cleanup. The test is skipped when TEST_DATABASE_URL is unset.
+func URL(t *testing.T) string {
+	t.Helper()
 	base := os.Getenv("TEST_DATABASE_URL")
 	if base == "" {
 		t.Skip("TEST_DATABASE_URL not set")
@@ -39,14 +51,9 @@ func New(t *testing.T) *store.Store {
 	q := u.Query()
 	q.Set("search_path", schema)
 	u.RawQuery = q.Encode()
-	st, err := store.Open(ctx, u.String())
-	if err != nil {
-		t.Fatal(err)
-	}
 	t.Cleanup(func() {
-		st.Close()
 		_, _ = admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE")
 		_ = admin.Close(ctx)
 	})
-	return st
+	return u.String()
 }

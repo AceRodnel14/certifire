@@ -56,31 +56,36 @@ st $X GET /api/account/webhooks >/dev/null; [ "$(j .discord)" = null ] && ok "WH
 UID_=$(psql_q "select id from users where username='hooky'")
 mkc() { st $W POST /api/certs "{\"name\":\"$1\",\"hosts\":[\"$1.example.com\"],\"bits\":2048,\"days\":825,\"subject\":{}}" >/dev/null; j .id; }
 setna() { psql_q "update certs set not_after = now() + interval '$2' where id='$1'" >/dev/null; }
+# setd ID N: expiry date = (UTC today + N days) at 12:00 UTC. Date-based reminders count calendar days, so cases never depend on the hour the suite runs.
+setd() { psql_q "update certs set not_after = (((now() at time zone 'utc')::date + ($2)) + time '12:00') at time zone 'utc' where id='$1'" >/dev/null; }
 restart() { $DC restart app >/dev/null 2>&1; for i in $(seq 1 40); do [ "$(curl -s -o /dev/null -w '%{http_code}' $BASE/readyz)" = 200 ] && break; sleep 1; done; sleep 4; }
 psql_q "delete from certs where user_id=$UID_" >/dev/null; psql_q "delete from reminders_sent" >/dev/null
 stub_reset; stub_mode '{"status":204}'
 check M0 200 $W PUT /api/account/webhooks/teams "$(put "$TU")"   # both kinds configured
 declare -A CID
-for d in 7 5 3 2 1; do CID[$d]=$(mkc "r$d"); setna "${CID[$d]}" "$d days 1 hour"; done
-for d in 0 4 6 8; do c=$(mkc "n$d"); case $d in 0) setna $c "10 hours";; 4) setna $c "4 days 1 hour";; 6) setna $c "6 days 1 hour";; 8) setna $c "8 days 1 hour";; esac; done
+for d in 7 5 3 1 0; do CID[$d]=$(mkc "r$d"); setd "${CID[$d]}" "$d"; done
+for d in 2 4 6 8; do c=$(mkc "n$d"); setd $c $d; done
 restart
-# 4/6 are not thresholds in this scheme: expect no message. 5 certs x 2 kinds = 10 messages.
-[ "$(stub_n)" = 10 ] && ok "M1/M9 10 messages (5 certs x 2 kinds)" || bad M1 "got $(stub_n)"
-for d in 7 5 3 2 1; do curl -s $STUBCTL/__requests | jq -r '.[].body' | grep -q "r$d.example.com" || bad M1d "no message for ${d}d cert"; done
-curl -s $STUBCTL/__requests | jq -r '.[].body' | grep -q 'expires in 7 day' && ok "M1 text 'expires in N day(s)'" || bad M1t
+# steps are 7,5,3,1,0 (default): 2/4/6/8 are not steps, expect no message. 5 certs x 2 kinds = 10 messages.
+[ "$(stub_n)" = 10 ] && ok "M1/M9 10 messages (5 certs x 2 kinds; 2,4,6,8 days: none)" || bad M1 "got $(stub_n)"
+for d in 7 5 3 1 0; do curl -s $STUBCTL/__requests | jq -r '.[].body' | grep -q "r$d.example.com" || bad M1d "no message for ${d}d cert"; done
+curl -s $STUBCTL/__requests | jq -r '.[].body' | grep -q 'expires in 7 days' && ok "M1 text 'expires in 7 days'" || bad M1t
+curl -s $STUBCTL/__requests | jq -r '.[].body' | grep -q 'expires in 1 day[^s]' && ok "M1 text 'expires in 1 day' (singular)" || bad M1t1
+curl -s $STUBCTL/__requests | jq -r '.[].body' | grep -q 'r0` expire[sd] today' && ok "M1 day 0: 'expires/expired today'" || bad M1t0
+[ "$(psql_q "select string_agg(distinct mark, ',' order by mark) from reminders_sent")" = "0,1,3,5,7" ] && ok "M1 marks are the step values" || bad M1m "$(psql_q "select string_agg(distinct mark, ',') from reminders_sent")"
 curl -s $STUBCTL/__requests | jq -r '.[].body' | grep -q 'PRIVATE KEY' && bad M13 "key in message" || ok "M13 no key material"
 restart; [ "$(stub_n)" = 10 ] && ok "M2 no resend after restart" || bad M2 "got $(stub_n)"
 [ "$(psql_q "select count(*) from reminders_sent")" = 10 ] && ok "M2 reminders_sent rows" || bad M2r
 # M4 expired
 stub_reset; psql_q "delete from reminders_sent" >/dev/null; psql_q "delete from certs where user_id=$UID_" >/dev/null
-c=$(mkc exp); setna $c "- 2 days"; restart
-[ "$(stub_n)" = 2 ] && ok "M4 expired: one per kind" || bad M4 "got $(stub_n)"; curl -s $STUBCTL/__requests | jq -r '.[].body' | grep -q 'expired' && ok "M4 text expired" || bad M4t
+c=$(mkc exp); setd $c -2; restart
+[ "$(stub_n)" = 2 ] && ok "M4 expired: one per kind" || bad M4 "got $(stub_n)"; curl -s $STUBCTL/__requests | jq -r '.[].body' | grep -q 'expired 2 days ago' && ok "M4 text 'expired 2 days ago'" || bad M4t
 restart; [ "$(stub_n)" = 2 ] && ok "M4 same UTC day: no repeat" || bad M4r
 psql_q "update reminders_sent set mark='expired:'||to_char((now() at time zone 'utc')::date-1,'YYYY-MM-DD')" >/dev/null; restart
 [ "$(stub_n)" = 4 ] && ok "M4 next UTC day: one more" || bad M4n "got $(stub_n)"
 # M5 renewed / deleted
 stub_reset; psql_q "delete from reminders_sent" >/dev/null; psql_q "delete from certs where user_id=$UID_" >/dev/null
-a=$(mkc ren); setna $a "3 days 1 hour"; st $W POST /api/certs/$a/renew >/dev/null; b=$(j .id); setna $b "500 days"; restart
+a=$(mkc ren); setd $a 3; st $W POST /api/certs/$a/renew >/dev/null; b=$(j .id); setna $b "500 days"; restart
 [ "$(stub_n)" = 0 ] && ok "M5 renewed cert: none" || bad M5 "got $(stub_n)"
 check M5d 204 $W DELETE /api/certs/$b; restart; [ "$(stub_n)" = 2 ] && ok "M5 renewal deleted: reminders resume" || bad M5r "got $(stub_n)"
 # M6 5xx retried
@@ -93,10 +98,10 @@ st $W GET /api/account/webhooks >/dev/null; [ "$(j .discord.broken)" = true ] &&
 [ "$(psql_q "select count(*) from reminders_sent")" -ge 1 ] && ok "M7 claim kept" || bad M7c
 stub_reset; restart; [ "$(stub_n)" = 0 ] && ok "M7 broken webhook skipped" || bad M7s "got $(stub_n)"
 # M10 other user without webhook gets nothing; M11 sequential many
-c=$(curl -s -X POST -b $X -c $X -H 'Content-Type: application/json' -H "Origin: $BASE" -d '{"name":"x","hosts":["x.example.com"],"bits":2048,"days":825,"subject":{}}' $BASE/api/certs | jq -r .id); setna $c "3 days 1 hour"
+c=$(curl -s -X POST -b $X -c $X -H 'Content-Type: application/json' -H "Origin: $BASE" -d '{"name":"x","hosts":["x.example.com"],"bits":2048,"days":825,"subject":{}}' $BASE/api/certs | jq -r .id); setd $c 3
 psql_q "delete from reminders_sent" >/dev/null; check M7r 200 $W PUT /api/account/webhooks/discord "$(put "$DU")"; check M7r2 200 $W PUT /api/account/webhooks/teams "$(put "$TU")"
 stub_reset; stub_mode '{"status":204}'; psql_q "delete from certs where user_id=$UID_" >/dev/null
-for i in $(seq 1 20); do c=$(mkc "m$i"); setna $c "5 days 1 hour"; done; restart; sleep 10
+for i in $(seq 1 20); do c=$(mkc "m$i"); setd $c 5; done; restart; sleep 10
 [ "$(stub_n)" = 40 ] && ok "M11 20 certs x 2 kinds = 40, no duplicates" || bad M11 "got $(stub_n)"
 [ "$(psql_q "select count(*) from reminders_sent")" = 40 ] && ok "M11 rows match" || bad M11r
 curl -s $STUBCTL/__requests | jq -r '.[].body' | grep -q 'x.example.com' && bad M10 "other user cert notified" || ok "M10 user without webhook gets none"

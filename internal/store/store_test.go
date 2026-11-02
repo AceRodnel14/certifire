@@ -138,3 +138,66 @@ func TestAllUsers(t *testing.T) {
 		t.Errorf("AllUsers %v %v", us, err)
 	}
 }
+
+func TestReminderCandidatesWindow(t *testing.T) {
+	st := storetest.New(t)
+	ctx := context.Background()
+	u := mkUser(t, st, "win")
+	if _, err := st.SetWebhook(ctx, u.ID, "discord", "https://discord.com/api/webhooks/123456789012345678/aB3_-aB3_-aB3_-aB3_-aB3_-aB3_-aB3_-aB3_-aB3_-aB3_-aB3_-aB3_-aB3_-aB3_-"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+	add := func(name string, off time.Duration) {
+		t.Helper()
+		c := &store.Cert{ID: crypto.NewUUID(), UserID: u.ID, Name: name, Hosts: []string{"h"}, Bits: 2048, Days: 10, Subject: []byte(`{}`),
+			CNF: "c", CertPEM: "p", KeyEnc: []byte("k"), NotBefore: now.Add(-time.Hour), NotAfter: now.Add(off)}
+		if err := st.InsertCert(ctx, c, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("expired-long-ago", -400*24*time.Hour)
+	add("in-8d", 8*24*time.Hour)
+	add("in-9d", 9*24*time.Hour+time.Hour)
+	names := func(window int) []string {
+		t.Helper()
+		cs, err := st.ReminderCandidates(ctx, now, window)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, c := range cs {
+			out = append(out, c.Name)
+		}
+		return out
+	}
+	// Window 9 = max step 7 + 2: reaches the 8-day cert, not the 9d1h one; expired stays.
+	if got := names(9); len(got) != 2 || got[0] != "expired-long-ago" || got[1] != "in-8d" {
+		t.Errorf("window 9: %v", got)
+	}
+	if got := names(3); len(got) != 1 {
+		t.Errorf("window 3: %v", got)
+	}
+	if got := names(11); len(got) != 3 {
+		t.Errorf("window 11: %v", got)
+	}
+}
+
+func TestOpenConcurrent(t *testing.T) {
+	url := storetest.URL(t)
+	const n = 6
+	errs := make(chan error, n)
+	for range n {
+		go func() {
+			st, err := store.Open(context.Background(), url)
+			if err == nil {
+				st.Close()
+			}
+			errs <- err
+		}()
+	}
+	for range n {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent Open: %v", err)
+		}
+	}
+}

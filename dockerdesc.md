@@ -12,25 +12,26 @@ Private keys are encrypted; certificates and webhook URLs are stored in plaintex
 ```yaml
 services:
   app:
-    image: <dockerhub-user>/certifire:latest
+    image: eacer/certifire:latest
     restart: unless-stopped
     ports: ["8080:8080"]
+    env_file: .env
     environment:
-      BASE_URL: http://localhost:8080
-      DATABASE_URL: postgres://certifire:<password>@db:5432/certifire?sslmode=disable
+      DATABASE_URL: postgres://certifire:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/certifire?sslmode=disable
     depends_on: [db]
   db:
-    image: postgres:18-alpine
+    image: postgres:18.6-alpine3.24
     restart: unless-stopped
     environment:
       POSTGRES_USER: certifire
-      POSTGRES_PASSWORD: <password>
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
       POSTGRES_DB: certifire
     volumes: ["pg-data:/var/lib/postgresql"]
 volumes:
   pg-data:
 ```
-`docker compose up -d`, then open `http://<host>:8080`. The first visit creates the
+**Before the first start**, create `.env` and set `POSTGRES_PASSWORD` (required; letters and digits) and `BASE_URL`;
+then `docker compose up -d`, then open `http://<host>:8080`. The first visit creates the
 `admin` user and shows the master key once: save it. Reset a password with
 `docker compose exec app /app reset-password`. For HTTPS, put a reverse proxy in front
 and set `BASE_URL` to the public URL.
@@ -43,9 +44,13 @@ and set `BASE_URL` to the public URL.
 | `DATABASE_URL` | none | PostgreSQL connection URL |
 | `LOG_LEVEL` | `info` | Log level |
 | `BACKUP_ALL_ALLOWED_IPS` | empty (off) | IPs/CIDRs allowed to call `POST /api/backup-all` directly (master key); see the full docs |
+| `REMINDER_TZ` | `UTC` | Time zone for the daily reminder check |
+| `REMINDER_TIME` | `00:00` | Time of the check, `HH:MM` in `REMINDER_TZ` |
+| `REMINDER_STEPS` | `7,5,3,1,0` | Days before expiry on which a reminder is sent |
+| `REMINDER_LOCAL_CRON` | `true` | Set `false` to disable the built-in timer and run `/app remind` from a Kubernetes CronJob |
 
 Data lives in PostgreSQL (the `pg-data` volume); the app container stores no files.
 Health: `/healthz` (liveness), `/readyz` (database reachable).
 
 ## Tags
-`latest`, `vX.Y`, `vX.Y.Z`. Platforms: `linux/amd64`, `linux/arm64`.
+`latest` (default, latest stable), `main` (default branch), `vX.Y`, `vX.Y.Z` (releases). Platforms: `linux/amd64`, `linux/arm64`.
